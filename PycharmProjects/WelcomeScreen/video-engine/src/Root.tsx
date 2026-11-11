@@ -54,8 +54,8 @@ export const Root: React.FC = () => {
       <Composition
         id="AingeneerM1n9Showreel"
         component={AingeneerM1n9Showreel}
-        durationInFrames={450} // 15s at 30fps
-        fps={30}
+        durationInFrames={900} // 15s at 60fps
+        fps={60}
         width={1920}
         height={1080}
       />
