@@ -1,0 +1,1345 @@
+=== FILE: ./scripts/main-pipeline.py ===
+import json
+import math
+import os
+import random
+import textwrap
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from dotenv import load_dotenv
+from elevenlabs import VoiceSettings
+from elevenlabs.client import ElevenLabs
+from google import genai
+from google.genai import types
+from moviepy import AudioFileClip, VideoClip, concatenate_videoclips
+from moviepy.audio.io.readers import FFMPEG_AudioReader
+from PIL import Image, ImageDraw, ImageFont
+
+# Replace end-of-file audio reads with silence instead of aborting the render.
+_ORIGINAL_GET_FRAME = FFMPEG_AudioReader.get_frame
+
+
+def _safe_get_frame(self: FFMPEG_AudioReader, tt: Any) -> np.ndarray:
+    try:
+        return _ORIGINAL_GET_FRAME(self, tt)
+    except (OSError, IOError):
+        if isinstance(tt, np.ndarray):
+            return np.zeros((len(tt), self.nchannels), dtype=np.float64)
+        return np.zeros((self.nchannels,), dtype=np.float64)
+
+
+FFMPEG_AudioReader.get_frame = _safe_get_frame
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
+WIDTH, HEIGHT, FPS = 1080, 1920, 30
+MAX_SHORT_SECONDS = 150
+try:
+    EPISODES_PER_SHORT = min(
+        4, max(2, int(os.getenv("EPISODES_PER_SHORT", "3")))
+    )
+except ValueError:
+    EPISODES_PER_SHORT = 3
+ASSETS_DIR = BASE_DIR / "assets" / "images"
+AUDIO_DIR = BASE_DIR / "output" / "audio"
+VIDEOS_DIR = BASE_DIR / "output" / "videos"
+for directory in (ASSETS_DIR, AUDIO_DIR, VIDEOS_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
+
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ENABLED = os.getenv("ENABLE_VOICE", "0").lower() in {"1", "true", "yes"}
+if not GEMINI_KEY or (VOICE_ENABLED and not ELEVEN_KEY):
+    raise ValueError("GEMINI_API_KEY обязателен; ELEVENLABS_API_KEY нужен только при ENABLE_VOICE=1")
+
+gemini_client = genai.Client(
+    api_key=GEMINI_KEY,
+    http_options=types.HttpOptions(
+        api_version="v1beta",
+        timeout=int(os.getenv("GEMINI_TIMEOUT_MS", "60000")),
+        retry_options=types.HttpRetryOptions(attempts=2),
+    ),
+)
+eleven_client = ElevenLabs(api_key=ELEVEN_KEY) if VOICE_ENABLED else None
+
+FALLBACK_STORY: dict[str, Any] = {
+    "title": "Правило №1: Автобус в лесу",
+    "series_tag": "ЗАПИСЬ № 01 · ЧАСТЬ 1/1",
+    "episode": 1,
+    "total_episodes": 1,
+    "location": "9 ЭТАЖ · ЛЕС — 06:50",
+    "scenes": [
+        {"timing": "0-5", "text": "Дядя... Он запер нас и ушёл в лес.",
+         "visual": "locked_door", "rule_badge": "ПРАВИЛО №1", "visual_detail": "дверь заблокирована снаружи"},
+        {"timing": "5-10", "text": "Автобус заглох в лесу. Двери заперты, а снаружи заражённый, которому нужны ключи.",
+         "visual": "bus_forest", "rule_badge": "", "visual_detail": "заражённый ждёт у дверей"},
+        {"timing": "10-16", "text": "Правило номер один: у дверей автобуса есть аварийный кран. Поверни — и двери откроются руками.",
+         "visual": "emergency_valve", "rule_badge": "ПРАВИЛО №1", "visual_detail": "аварийный кран · обычно над дверью"},
+        {"timing": "16-22", "text": "Толпа бежит к трассе. В давке рука Милы выскальзывает из твоей — её нет.",
+         "visual": "hands_slip", "rule_badge": "", "visual_detail": "давка у выхода"},
+        {"timing": "22-28", "text": "Из темноты слышен чужой голос: Мила, отдай ключи...",
+         "visual": "infected_close", "rule_badge": "", "visual_detail": "голос приманки в темноте"},
+        {"timing": "28-34", "text": "Правило номер два: потерялся в лесу — остановись и стой на месте. Мила обнимает дерево и молчит.",
+         "visual": "hug_tree", "rule_badge": "ПРАВИЛО №2", "visual_detail": "стой на месте"},
+        {"timing": "34-40", "text": "Ты находишь её через двенадцать минут. Она разжимает кулак — на связке маленький ключ без номера.",
+         "visual": "key_hand", "rule_badge": "", "visual_detail": "ключ без номера"},
+        {"timing": "40-45", "text": "Он от замка на цепи в подвале. Вода всего дома в руке семилетней девочки.",
+         "visual": "padlock_chain", "rule_badge": "", "visual_detail": "подвал · кран стояка"},
+        {"timing": "45-50", "text": "Вернуться и открыть воду? Да или нет?",
+         "visual": "choice", "rule_badge": "", "visual_detail": "9 этаж · лес",
+         "is_ending": True, "is_choice_scene": True,
+         "choice_a": "ОТКРЫТЬ", "choice_b": "ОСТАТЬСЯ"},
+    ],
+}
+
+
+def get_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in (
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ):
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def wrapped(text: str, width: int = 23) -> str:
+    return "\n".join(textwrap.wrap(text.upper(), width=width, break_long_words=False))
+
+
+def get_scene_duration(scene: dict[str, Any]) -> float:
+    timing = str(scene.get("timing", "0-5")).replace(" ", "").split("-", 1)
+    try:
+        return max(float(timing[1]) - float(timing[0]), 0.1)
+    except (IndexError, ValueError):
+        return 5.0
+
+
+def draw_stickman(draw: ImageDraw.ImageDraw, x: int, y: int, scale: float = 1.0,
+                  shirt: tuple[int, int, int] = (74, 134, 184),
+                  pants: tuple[int, int, int] = (45, 52, 64),
+                  skin: tuple[int, int, int] = (232, 205, 175),
+                  infected: bool = False) -> None:
+    if infected:
+        skin, shirt, pants = (120, 128, 136), (90, 96, 104), (65, 70, 78)
+    r = int(42 * scale)
+    draw.ellipse((x - r, y - r, x + r, y + r), fill=skin, outline=(18, 22, 28), width=4)
+    if infected:
+        draw.ellipse((x - int(16 * scale), y - int(10 * scale), x - int(6 * scale), y), fill="white")
+        draw.ellipse((x + int(6 * scale), y - int(10 * scale), x + int(16 * scale), y), fill="white")
+        draw.ellipse((x - int(6 * scale), y + int(12 * scale), x + int(6 * scale), y + int(24 * scale)), fill=(20, 24, 30))
+    bw, bh = int(48 * scale), int(150 * scale)
+    by = y + r + int(8 * scale)
+    draw.rounded_rectangle((x - bw, by, x + bw, by + bh), radius=int(20 * scale),
+                           fill=shirt, outline=(18, 22, 28), width=4)
+    lh = int(140 * scale)
+    draw.rounded_rectangle((x - bw + int(6 * scale), by + bh - int(10 * scale),
+                            x - int(4 * scale), by + bh + lh), radius=int(10 * scale),
+                           fill=pants, outline=(18, 22, 28), width=4)
+    draw.rounded_rectangle((x + int(4 * scale), by + bh - int(10 * scale),
+                            x + bw - int(6 * scale), by + bh + lh), radius=int(10 * scale),
+                           fill=pants, outline=(18, 22, 28), width=4)
+
+
+def draw_trees_bg(draw: ImageDraw.ImageDraw, shift: int = 0) -> None:
+    for idx, x in enumerate(range(-60, WIDTH + 120, 165)):
+        tx = x + (shift * 6 if idx % 2 == 0 else -shift * 4)
+        top_y = 360 + (idx % 3) * 70
+        color = (22, 42, 32) if idx % 2 == 0 else (15, 30, 22)
+        draw.polygon([(tx, top_y), (tx - 160, 1480), (tx + 160, 1480)], fill=color)
+        draw.polygon([(tx, top_y + 180), (tx - 190, 1550), (tx + 190, 1550)], fill=color)
+
+
+def _legacy_draw_scene(scene: dict[str, str], location: str, phase: int,
+               word_index: int = -1, words: list[str] | None = None) -> Image.Image:
+    scene_type = scene.get("visual", "bus_forest")
+    rule_badge = scene.get("rule_badge", "").strip()
+    detail_label = scene.get("visual_detail", "").strip()
+    choice = scene_type == "choice"
+    image = Image.new("RGB", (WIDTH, HEIGHT), (18, 22, 26))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(20, 25, 30))
+    draw_trees_bg(draw, phase)
+    draw.rectangle((0, 1380, WIDTH, HEIGHT), fill=(12, 15, 19))
+
+    loc_text = location.upper()[:28]
+    loc_w = int(draw.textlength(loc_text, font=get_font(28))) + 44
+    draw.rounded_rectangle((42, 52, 42 + loc_w, 108), radius=14,
+                           fill=(10, 13, 17), outline=(160, 170, 180), width=2)
+    draw.text((42 + loc_w // 2, 80), loc_text, font=get_font(28),
+              fill=(235, 240, 245), anchor="mm")
+
+    if scene_type == "locked_door":
+        draw.rectangle((190, 280, 890, 1500), fill=(28, 34, 42), outline=(70, 80, 92), width=14)
+        draw.rectangle((225, 320, 525, 1460), fill=(18, 30, 26), outline=(55, 65, 75), width=6)
+        draw.rectangle((555, 320, 855, 1460), fill=(18, 30, 26), outline=(55, 65, 75), width=6)
+        draw.rounded_rectangle((440, 835, 740, 875), radius=10, fill=(196, 164, 132), outline=(30, 24, 18), width=4)
+        draw.rounded_rectangle((680 + phase * 6, 815, 920, 905), radius=22, fill=(150, 160, 170), outline=(25, 30, 35), width=4)
+        draw_stickman(draw, 330, 980, scale=1.15, shirt=(115, 155, 195))
+    elif scene_type == "bus_forest":
+        bx, by = 110, 680 + phase * 2
+        draw.rounded_rectangle((bx, by, bx + 650, by + 360), radius=28, fill=(210, 215, 220), outline=(30, 35, 42), width=8)
+        draw.rectangle((bx + 10, by + 210, bx + 640, by + 235), fill=(45, 105, 175))
+        for wx in range(bx + 45, bx + 580, 125):
+            draw.rounded_rectangle((wx, by + 55, wx + 95, by + 175), radius=10, fill=(35, 45, 55), outline=(25, 30, 35), width=5)
+            draw.ellipse((wx + 32, by + 95, wx + 64, by + 130), fill=(215, 220, 225))
+        draw.ellipse((bx + 90, by + 310, bx + 190, by + 410), fill=(20, 22, 25), outline=(90, 95, 100), width=8)
+        draw.ellipse((bx + 460, by + 310, bx + 560, by + 410), fill=(20, 22, 25), outline=(90, 95, 100), width=8)
+        draw_stickman(draw, 875, 760, scale=1.25, infected=True)
+    elif scene_type == "emergency_valve":
+        draw.rectangle((220, 460, 860, 1460), fill=(48, 54, 62), outline=(85, 92, 102), width=8)
+        draw.line((540, 460, 540, 1460), fill=(25, 30, 36), width=8)
+        draw.ellipse((445, 230, 635, 420), fill=(28, 33, 40), outline=(235, 175, 65), width=8)
+        draw.rounded_rectangle((480, 312, 600, 338), radius=10, fill=(225, 60, 60))
+        if phase % 2 == 0:
+            draw.rounded_rectangle((527, 265, 553, 385), radius=10, fill=(225, 60, 60))
+    elif scene_type == "crowd_run":
+        positions = [(170, 820, (90, 110, 95)), (310, 800, (120, 95, 90)), (470, 770, (55, 125, 185)),
+                     (640, 810, (110, 105, 120)), (800, 790, (85, 115, 105)), (920, 830, (130, 100, 95))]
+        for idx, (px, py, shirt_col) in enumerate(positions):
+            draw_stickman(draw, px + phase * 8, py + (idx % 2) * 12, scale=0.95, shirt=shirt_col)
+        draw_stickman(draw, 380 - phase * 6, 910, scale=0.72, shirt=(235, 195, 65), pants=(215, 120, 145))
+    elif scene_type == "hands_slip":
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(22, 27, 34))
+        offset = phase * 18
+        draw.polygon([(-40, 1180), (260 - offset, 960), (310 - offset, 1035), (20, 1270)], fill=(230, 185, 55))
+        draw.ellipse((235 - offset, 915, 365 - offset, 1035), fill=(242, 242, 242), outline=(30, 35, 40), width=5)
+        draw.polygon([(1120, 420), (670 + offset, 740), (740 + offset, 835), (1160, 540)], fill=(55, 115, 175))
+        draw.ellipse((560 + offset, 710, 740 + offset, 875), fill=(242, 242, 242), outline=(30, 35, 40), width=5)
+    elif scene_type == "infected_close":
+        draw_stickman(draw, 540, 560, scale=2.2, infected=True)
+    elif scene_type == "hug_tree":
+        draw.rectangle((480, 180, 610, 1520), fill=(72, 48, 32), outline=(35, 22, 14), width=6)
+        draw.ellipse((210, 520, 870, 1180), outline=(225, 180, 65), width=6)
+        draw_stickman(draw, 430, 740, scale=1.05, shirt=(235, 195, 65), pants=(215, 120, 145))
+    elif scene_type == "key_hand":
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(22, 27, 34))
+        draw.polygon([(-30, 1220), (380, 860), (465, 960), (60, 1340)], fill=(230, 185, 55))
+        draw.ellipse((350, 680, 690, 990), fill=(245, 245, 245), outline=(30, 35, 40), width=6)
+        draw.ellipse((465, 745, 555, 835), outline=(160, 165, 170), width=8)
+        draw.line((530, 810, 660, 910), fill=(225, 185, 65), width=18)
+        draw.line((500, 820, 590, 945), fill=(225, 185, 65), width=18)
+        draw.ellipse((310, 735, 510, 935), outline=(225, 55, 55), width=8)
+    elif scene_type == "padlock_chain":
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(18, 21, 26))
+        draw.rectangle((512, 120, 568, 1520), fill=(105, 112, 122))
+        draw.ellipse((410, 470, 670, 730), outline=(220, 55, 55), width=16)
+        draw.line((430, 500, 650, 700), fill=(190, 195, 200), width=14)
+        draw.line((650, 500, 430, 700), fill=(190, 195, 200), width=14)
+        draw.arc((485, 705, 595, 835), 180, 360, fill=(195, 200, 205), width=18)
+        draw.rounded_rectangle((460, 780, 620, 930), radius=22, fill=(230, 185, 65), outline=(35, 30, 20), width=6)
+        draw.ellipse((525, 835, 555, 865), fill=(30, 30, 30))
+    elif scene_type in ("building_pipes", "choice"):
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(15, 19, 24))
+        draw.rectangle((160, 300, 920, 1180), fill=(28, 36, 46), outline=(55, 68, 82), width=6)
+        for row in range(6):
+            wy = 340 + row * 135
+            draw.line((160, wy + 105, 920, wy + 105), fill=(20, 26, 34), width=4)
+            for col in range(4):
+                wx = 205 + col * 185 + (-15 if col == 1 else 15 if col == 2 else 0)
+                lit = (row + col + phase) % 3 == 0
+                draw.rounded_rectangle((wx, wy, wx + 110, wy + 75), radius=6,
+                                       fill=(95, 145, 175) if lit else (42, 56, 70))
+        draw.rectangle((528, 280, 552, 1220), fill=(40, 50, 60))
+        water_top = 520 - phase * 60
+        draw.rectangle((531, water_top, 549, 1220), fill=(110, 205, 255))
+
+    if detail_label and not choice:
+        draw.text((540, 195), detail_label.lower()[:46], font=get_font(34),
+                  fill=(235, 190, 95), anchor="mm")
+    if rule_badge:
+        badge_w = int(draw.textlength(rule_badge.upper(), font=get_font(34))) + 48
+        draw.rounded_rectangle((540 - badge_w // 2, 125, 540 + badge_w // 2, 180),
+                               radius=14, fill=(195, 45, 45))
+        draw.text((540, 152), rule_badge.upper(), font=get_font(34), fill="white", anchor="mm")
+    if choice:
+        for box, label, bg_col, txt_col in (
+            ((140, 1080, 515, 1270), "ДА", (245, 245, 245) if phase % 2 == 0 else (45, 50, 58),
+             (15, 18, 22) if phase % 2 == 0 else (230, 235, 240)),
+            ((565, 1080, 940, 1270), "НЕТ", (220, 42, 42) if phase % 2 == 1 else (75, 25, 28), "white"),
+        ):
+            draw.rounded_rectangle(box, radius=24, fill=bg_col)
+            draw.text(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2), label,
+                      font=get_font(86), fill=txt_col, anchor="mm")
+        draw.text((540, 1345), "пиши в комментариях 👇", font=get_font(36),
+                  fill=(170, 178, 188), anchor="mm")
+    if words:
+        lines: list[list[tuple[int, str]]] = [[]]
+        for idx, word in enumerate(words):
+            if sum(len(item[1]) + 1 for item in lines[-1]) + len(word) > 20 and lines[-1]:
+                lines.append([])
+            lines[-1].append((idx, word))
+        base_y = 680 if choice else 1280
+        font_sub = get_font(56)
+        for line in lines[-3:]:
+            widths = [int(draw.textlength(word.upper(), font=font_sub)) + 28 for _, word in line]
+            start_x = 540 - (sum(widths) + 12 * (len(line) - 1)) // 2
+            for (w_idx, word), box_w in zip(line, widths):
+                draw.rounded_rectangle((start_x, base_y - 42, start_x + box_w, base_y + 42),
+                                       radius=12, fill=(210, 48, 42) if w_idx == word_index else (12, 15, 20))
+                draw.text((start_x + box_w // 2, base_y), word.upper(), font=font_sub,
+                          fill="white", anchor="mm")
+                start_x += box_w + 12
+            base_y += 96
+    return image
+
+
+def _rgb(val: Any, default: tuple[int, int, int] = (200, 200, 200)) -> tuple[int, int, int]:
+    if isinstance(val, (list, tuple)) and len(val) >= 3:
+        return tuple(max(0, min(255, int(val[index]))) for index in range(3))
+    return default
+
+
+def _draw_actor(draw: ImageDraw.ImageDraw, cmd: dict[str, Any], dx: int, dy: int) -> None:
+    x = int(cmd.get("x", 540)) + dx
+    y = int(cmd.get("y", 950)) + dy
+    scale = float(cmd.get("scale", 1.0))
+    shirt = _rgb(cmd.get("shirt"), (62, 118, 176))
+    skin = _rgb(cmd.get("skin"), (232, 202, 175))
+    hair = _rgb(cmd.get("hair"), (48, 36, 30))
+    outline = (20, 24, 30)
+    emotion = str(cmd.get("emotion", "scared"))
+    pose = str(cmd.get("pose", "stand"))
+
+    if pose == "lie":
+        draw.rounded_rectangle((x - int(180 * scale), y, x + int(140 * scale), y + int(95 * scale)),
+                               radius=int(24 * scale), fill=shirt, outline=outline, width=5)
+        draw.ellipse((x - int(250 * scale), y - int(10 * scale),
+                      x - int(150 * scale), y + int(90 * scale)),
+                     fill=skin, outline=outline, width=5)
+        return
+
+    body_w, body_h = int(95 * scale), int(230 * scale)
+    draw.rounded_rectangle((x - body_w, y, x + body_w, y + body_h),
+                           radius=int(32 * scale), fill=shirt, outline=outline, width=5)
+    leg_w, leg_h = int(36 * scale), int(175 * scale)
+    for left, right in (
+        (x - body_w + int(14 * scale), x - int(8 * scale)),
+        (x + int(8 * scale), x + body_w - int(14 * scale)),
+    ):
+        draw.rounded_rectangle((left, y + body_h - int(15 * scale), right, y + body_h + leg_h),
+                               radius=int(14 * scale), fill=(38, 44, 54), outline=outline, width=5)
+
+    radius = int(68 * scale)
+    head_y = y - radius - int(8 * scale)
+    if cmd.get("hood"):
+        draw.ellipse((x - radius - int(16 * scale), head_y - int(16 * scale),
+                      x + radius + int(16 * scale), head_y + radius + int(16 * scale)),
+                     fill=shirt, outline=outline, width=5)
+    draw.ellipse((x - radius, head_y - radius, x + radius, head_y + radius),
+                 fill=skin, outline=outline, width=5)
+    draw.pieslice((x - radius, head_y - radius, x + radius, head_y + radius),
+                  180, 360, fill=hair)
+
+    eye_radius = int(13 * scale) if emotion in ("scared", "shock") else int(9 * scale)
+    for eye_x in (x - int(24 * scale), x + int(24 * scale)):
+        draw.ellipse((eye_x - eye_radius, head_y - eye_radius,
+                      eye_x + eye_radius, head_y + eye_radius),
+                     fill="white", outline=outline, width=3)
+        draw.ellipse((eye_x - int(5 * scale), head_y - int(5 * scale),
+                      eye_x + int(5 * scale), head_y + int(5 * scale)), fill=outline)
+    if emotion in ("scared", "shock"):
+        draw.ellipse((x - int(12 * scale), head_y + int(22 * scale),
+                      x + int(12 * scale), head_y + int(44 * scale)),
+                     fill=(30, 20, 25), outline=outline, width=3)
+    else:
+        draw.line((x - int(16 * scale), head_y + int(30 * scale),
+                   x + int(16 * scale), head_y + int(30 * scale)), fill=outline, width=4)
+
+    if pose == "cover_head":
+        for left, right in (
+            (x - body_w - int(25 * scale), x - body_w + int(15 * scale)),
+            (x + body_w - int(15 * scale), x + body_w + int(25 * scale)),
+        ):
+            draw.rounded_rectangle((left, head_y - int(20 * scale), right, y + int(90 * scale)),
+                                   radius=int(16 * scale), fill=shirt, outline=outline, width=4)
+    elif pose == "phone":
+        draw.rounded_rectangle((x + body_w - int(20 * scale), head_y,
+                                x + body_w + int(35 * scale), y + int(110 * scale)),
+                               radius=int(16 * scale), fill=shirt, outline=outline, width=4)
+        draw.rounded_rectangle((x + radius - int(5 * scale), head_y - int(25 * scale),
+                                x + radius + int(28 * scale), head_y + int(35 * scale)),
+                               radius=6, fill=(18, 20, 24), outline=(90, 95, 105), width=2)
+
+
+def draw_character(draw: ImageDraw.ImageDraw, x: int, y: int, scale: float = 1.0,
+                   coat: tuple[int, int, int] = (62, 118, 176),
+                   skin: tuple[int, int, int] = (232, 202, 175),
+                   hair: tuple[int, int, int] = (48, 36, 30),
+                   emotion: str = "scared", pose: str = "stand",
+                   hood: bool = False, name_tag: str = "") -> None:
+    _draw_actor(draw, {
+        "x": x, "y": y, "scale": scale, "shirt": coat, "skin": skin,
+        "hair": hair, "emotion": emotion, "pose": pose, "hood": hood,
+        "name_tag": name_tag,
+    }, 0, 0)
+
+
+def draw_city_skyline(draw: ImageDraw.ImageDraw, y_base: int = 1150,
+                      flash: bool = False) -> None:
+    buildings = (
+        (30, 680, 140), (155, 590, 165), (305, 730, 130),
+        (420, 520, 190), (595, 640, 155), (735, 560, 175), (895, 670, 160),
+    )
+    for index, (x, y, width) in enumerate(buildings):
+        color = (68, 76, 92) if flash else ((26, 32, 44) if index % 2 == 0 else (18, 23, 32))
+        draw.rectangle((x, y, x + width, y_base), fill=color, outline=(12, 16, 22), width=3)
+        for window_y in range(y + 35, y_base - 60, 65):
+            for window_x in range(x + 22, x + width - 35, 48):
+                if (window_x + window_y + index) % 5 == 0:
+                    draw.rectangle((window_x, window_y, window_x + 22, window_y + 32),
+                                   fill=(235, 205, 115))
+
+
+def draw_environment_details(
+    draw: ImageDraw.ImageDraw,
+    scene: dict[str, Any],
+    story_meta: dict[str, Any],
+    phase: float,
+    accent: tuple[int, int, int],
+) -> None:
+    """Adds generated location props to the procedural background."""
+    description = " ".join(
+        [str(story_meta.get("location", ""))] +
+        [
+            str(scene.get(key, ""))
+            for key in ("location", "environment_detail",
+                        "background_scene", "background_objects")
+        ]
+    ).lower()
+    shadow, metal, warm = (18, 22, 28), (125, 136, 148), (235, 185, 72)
+
+    if any(word in description for word in ("маяк", "lighthouse", "берег", "shore")):
+        draw.rectangle((790, 470, 900, 1040), fill=shadow, outline=metal, width=8)
+        draw.polygon([(745, 470), (945, 470), (900, 380), (790, 380)],
+                     fill=shadow, outline=metal)
+        draw.ellipse((775, 420, 915, 560), outline=warm, width=8)
+        draw.line((845, 490, 845 + int(90 * math.sin(phase)), 490),
+                  fill=warm, width=5)
+    elif any(word in description for word in ("метро", "туннел", "subway", "station", "перрон")):
+        for y in (470, 610, 750):
+            draw.line((120, y, 960, y), fill=(70, 78, 90), width=8)
+        draw.line((150, 1040, 930, 1040), fill=metal, width=12)
+        for x in range(190, 900, 140):
+            draw.line((x, 980, x + 70, 980), fill=warm, width=6)
+    elif any(word in description for word in ("больниц", "hospital", "операцион", "ward")):
+        draw.rectangle((170, 400, 910, 1080), fill=(205, 215, 216),
+                       outline=(75, 88, 98), width=8)
+        draw.rectangle((230, 490, 850, 570), fill=(35, 105, 105))
+        draw.text((540, 530), "ПАЛАТА 13", font=get_font(38), fill="white", anchor="mm")
+        draw.line((300, 850, 820, 850), fill=(90, 100, 105), width=8)
+        draw.ellipse((460, 760, 620, 920), outline=accent, width=8)
+    elif any(word in description for word in ("музей", "museum", "восков", "gallery")):
+        for x in (210, 540, 870):
+            draw.rectangle((x - 70, 500, x + 70, 1010), fill=(48, 42, 42),
+                           outline=(180, 155, 110), width=6)
+            draw.ellipse((x - 38, 560, x + 38, 710), fill=(105, 108, 112))
+            draw.rectangle((x - 42, 710, x + 42, 940), fill=(70, 72, 78))
+    elif any(word in description for word in ("подвод", "submarine", "корабл", "ship", "кают")):
+        draw.ellipse((170, 430, 910, 1150), outline=metal, width=12)
+        for x in (330, 540, 750):
+            draw.ellipse((x - 48, 600, x + 48, 696), fill=(20, 35, 48),
+                         outline=warm, width=6)
+        draw.line((300, 900, 780, 900), fill=metal, width=10)
+    else:
+        offset = int(18 * math.sin(phase))
+        draw.rectangle((90 + offset, 1030, 990 + offset, 1080),
+                       fill=shadow, outline=accent, width=3)
+        for x in range(150 + offset, 950 + offset, 160):
+            draw.line((x, 1030, x + 30, 940), fill=(90, 98, 108), width=5)
+
+
+def draw_scene(scene: dict[str, Any], story_meta: dict[str, Any], phase: float,
+               word_index: int = -1, words: list[str] | None = None,
+               show_choice: bool | None = None,
+               choice_source: dict[str, Any] | None = None) -> Image.Image:
+    phase = float(phase)
+    phase_step = int(phase)
+    bg_top = _rgb(scene.get("bg_top"), (22, 26, 34))
+    bg_bottom = _rgb(scene.get("bg_bottom"), (10, 13, 18))
+    image = Image.new("RGB", (WIDTH, HEIGHT), bg_top)
+    draw = ImageDraw.Draw(image)
+
+    for y_band in range(0, HEIGHT, 24):
+        ratio = y_band / HEIGHT
+        color = tuple(int(bg_top[i] * (1 - ratio) + bg_bottom[i] * ratio) for i in range(3))
+        draw.rectangle((0, y_band, WIDTH, y_band + 24), fill=color)
+
+    template = str(scene.get("template") or scene.get("visual") or "room_window")
+    template = {
+        "locked_door": "room_window",
+        "bus_forest": "car_inside",
+        "emergency_valve": "car_outside",
+        "crowd_run": "basement_crowd",
+        "hands_slip": "broken_window",
+        "infected_close": "room_window",
+        "hug_tree": "city_flash",
+        "key_hand": "phone_closeup",
+        "padlock_chain": "car_trunk",
+        "building_pipes": "map_plan",
+        "choice": "phone_closeup",
+    }.get(template, template)
+    accent = _rgb(scene.get("accent_color"), (235, 115, 45))
+    if not scene.get("canvas"):
+        if template in ("city_flash", "building_pipes"):
+            flash_radius = 180 + phase * 55
+            draw.ellipse((540 - flash_radius, 680 - flash_radius,
+                          540 + flash_radius, 680 + flash_radius), fill=(245, 215, 155))
+            draw_city_skyline(draw, y_base=1220, flash=phase_step % 2 == 1)
+            draw.rectangle((0, 1220, WIDTH, HEIGHT), fill=(12, 15, 20))
+        elif template in ("room_window", "locked_door"):
+            draw.rectangle((0, 260, WIDTH, 1260), fill=(92, 86, 78))
+            draw.rectangle((380, 340, 960, 960), fill=(22, 28, 40),
+                           outline=(215, 218, 224), width=14)
+            draw_city_skyline(draw, y_base=950)
+            draw.line((670, 340, 670, 960), fill=(215, 218, 224), width=12)
+            draw.line((380, 560, 960, 560), fill=(215, 218, 224), width=10)
+            draw_character(draw, 240, 770 + phase * 3, scale=1.05,
+                           coat=_rgb(scene.get("coat_color"), (56, 118, 182)),
+                           emotion="scared", pose=str(scene.get("pose", "stand")),
+                           name_tag=str(scene.get("actor_name", "")))
+            draw_character(draw, 730, 820, scale=0.92,
+                           coat=_rgb(scene.get("secondary_color"), (225, 178, 52)),
+                           emotion="shock", pose="phone")
+        elif template in ("broken_window", "hands_slip"):
+            draw.rectangle((0, 260, WIDTH, 1260), fill=(72, 68, 64))
+            draw.rectangle((360, 340, 950, 960), fill=(18, 22, 30),
+                           outline=(190, 195, 205), width=12)
+            draw_city_skyline(draw, y_base=950)
+            for index in range(5):
+                x = 420 + index * 120 - phase * (index + 1) * 8
+                draw.polygon([(x, 520), (x + 60, 540), (x + 25, 690)],
+                             fill=(165, 205, 230), outline=(225, 240, 255))
+        elif template in ("car_inside", "bus_forest", "crowd_run"):
+            draw.rectangle((60, 320, 1020, 1320), fill=(32, 37, 46),
+                           outline=(18, 20, 25), width=8)
+            draw.rounded_rectangle((170, 360, 910, 740), radius=24,
+                                   fill=(18, 26, 38), outline=(55, 62, 75), width=8)
+            draw_city_skyline(draw, y_base=735)
+            draw.rounded_rectangle((120, 760, 960, 1280), radius=42,
+                                   fill=(46, 52, 64), outline=(22, 26, 32), width=6)
+            draw_character(draw, 540, 780 + phase * 2, scale=1.08,
+                           coat=_rgb(scene.get("secondary_color"), (225, 178, 52)),
+                           hood=True, emotion="scared",
+                           pose=str(scene.get("pose", "stand")),
+                           name_tag=str(scene.get("actor_name", "")))
+        elif template in ("car_outside", "emergency_valve"):
+            draw.rectangle((0, 1080, WIDTH, HEIGHT), fill=(28, 32, 38))
+            for light_x in (240, 820):
+                draw.rectangle((light_x - 8, 420, light_x + 8, 1080), fill=(70, 78, 88))
+                draw.polygon([(light_x, 430), (light_x - 190, 1080),
+                              (light_x + 190, 1080)], fill=(42, 46, 38))
+                draw.ellipse((light_x - 24, 410, light_x + 24, 445), fill=(245, 215, 95))
+            draw.rounded_rectangle((160 + phase * 12, 830, 920 + phase * 12, 1005),
+                                   radius=28, fill=(235, 190, 42), outline=(20, 24, 30), width=6)
+        elif template in ("car_trunk", "padlock_chain"):
+            draw.rectangle((60, 420, 1020, 1180), fill=(78, 32, 36),
+                           outline=(235, 190, 42), width=18)
+            draw.ellipse((780, 480, 910, 610), fill=(32, 95, 52))
+            draw.line((845, 510, 845, 575), fill=(95, 255, 135), width=14)
+            draw.line((810, 575, 880, 575), fill=(95, 255, 135), width=14)
+            draw_character(draw, 520 + phase * 10, 810, scale=1.05,
+                           coat=(225, 178, 52), pose="lie")
+        elif template in ("phone_closeup", "key_hand"):
+            draw.polygon([(180, 1450), (260, 960), (350, 980), (290, 1450)],
+                         fill=(225, 178, 52), outline=(20, 24, 30), width=5)
+            draw.polygon([(900, 1450), (820, 960), (730, 980), (790, 1450)],
+                         fill=(56, 118, 182), outline=(20, 24, 30), width=5)
+            draw.rounded_rectangle((250, 320, 830, 1340), radius=64,
+                                   fill=(14, 18, 26), outline=(95, 105, 122), width=10)
+            draw.text((540, 465), str(scene.get("clock", "03:15")),
+                      font=get_font(96), fill="white", anchor="mm")
+            draw.rounded_rectangle((290, 630, 790, 910), radius=32, fill=accent)
+            draw.text((540, 770), str(scene.get("phone_header", "112 · SOS")).upper()[:20],
+                      font=get_font(38), fill="white", anchor="mm")
+        elif template == "radio_kit":
+            draw.rounded_rectangle((140, 430, 940, 1120), radius=34,
+                                   fill=(38, 42, 48), outline=(190, 195, 205), width=10)
+            draw.rectangle((220, 560, 860, 680), fill=(12, 16, 20),
+                           outline=(225, 175, 65), width=5)
+            draw.text((540, 620), str(scene.get("radio_frequency", "87.4 FM")),
+                      font=get_font(58), fill=(245, 205, 95), anchor="mm")
+            draw.line((540, 430, 540 + phase * 25, 300), fill=(225, 230, 235), width=12)
+            draw.ellipse((475, 1030, 605, 1160), fill=accent, outline="white", width=5)
+        elif template in ("map_plan", "building_pipes"):
+            draw.rectangle((130, 360, 950, 1180), fill=(20, 26, 36),
+                           outline=(225, 230, 240), width=12)
+            draw.line((470, 360, 470, 1180), fill=(225, 230, 240), width=10)
+            draw.line((130, 800, 950, 800), fill=(225, 230, 240), width=10)
+            draw.rectangle((150, 820, 440, 1150), fill=(24, 78, 52))
+            draw.ellipse((650 - phase * 40, 700, 710 - phase * 40, 760),
+                         fill=(55, 135, 225), outline="white", width=5)
+        else:
+            draw.rounded_rectangle((160, 520, 920, 1010), radius=36,
+                                   fill=(58, 62, 68), outline=(22, 26, 32), width=8)
+            draw.ellipse((215, 605, 555, 945), fill=(32, 36, 42), outline=(20, 22, 26), width=6)
+
+    draw_environment_details(draw, scene, story_meta, phase, accent)
+
+    for command in scene.get("canvas", []):
+        if not isinstance(command, dict):
+            continue
+        kind = command.get("op", "rect")
+        dx = int(command.get("dx", 0)) * phase
+        dy = int(command.get("dy", 0)) * phase
+        fill = _rgb(command.get("fill")) if "fill" in command else None
+        outline = _rgb(command.get("outline")) if "outline" in command else None
+        stroke_width = int(command.get("w_stroke", 4))
+
+        if kind == "rect":
+            x1, y1 = int(command.get("x", 100)) + dx, int(command.get("y", 400)) + dy
+            x2 = x1 + int(command.get("w", 200))
+            y2 = y1 + int(command.get("h", 200))
+            draw.rounded_rectangle((x1, y1, x2, y2), radius=int(command.get("radius", 12)),
+                                   fill=fill, outline=outline,
+                                   width=stroke_width if outline else 0)
+        elif kind == "circle":
+            cx, cy = int(command.get("x", 540)) + dx, int(command.get("y", 850)) + dy
+            radius = int(command.get("r", 80))
+            draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius),
+                         fill=fill, outline=outline, width=stroke_width if outline else 0)
+        elif kind == "line":
+            draw.line((int(command.get("x1", 200)) + dx, int(command.get("y1", 600)) + dy,
+                       int(command.get("x2", 800)) + dx, int(command.get("y2", 900)) + dy),
+                      fill=fill or (235, 185, 65), width=int(command.get("w_stroke", 8)))
+        elif kind == "actor":
+            _draw_actor(draw, command, dx, dy)
+        elif kind == "phone_ui":
+            px, py = 270 + dx, 360 + dy
+            draw.rounded_rectangle((px, py, px + 540, py + 940), radius=54,
+                                   fill=(18, 22, 30), outline=(85, 92, 105), width=8)
+            header = str(command.get("header", "112 · ЭКСТРЕННЫЙ ВЫЗОВ"))[:24]
+            subtext = str(command.get("subtext", "Геопозиция отправлена"))[:32]
+            badge_color = _rgb(command.get("fill"), (205, 45, 45))
+            draw.rounded_rectangle((px + 45, py + 180, px + 495, py + 440),
+                                   radius=28, fill=badge_color)
+            draw.text((px + 270, py + 275), header.upper(), font=get_font(40),
+                      fill="white", anchor="mm")
+            draw.text((px + 270, py + 355), subtext, font=get_font(30),
+                      fill=(235, 240, 245), anchor="mm")
+        elif kind == "callout":
+            cx, cy = int(command.get("x", 540)) + dx, int(command.get("y", 520)) + dy
+            tx, ty = int(command.get("tx", cx)), int(command.get("ty", cy + 140))
+            label = str(command.get("label", "ДЕТАЛЬ")).upper()[:26]
+            tag_color = _rgb(command.get("fill"), (215, 52, 48))
+            draw.line((cx, cy, tx, ty), fill=tag_color, width=5)
+            draw.ellipse((tx - 9, ty - 9, tx + 9, ty + 9), fill=tag_color)
+            text_width = int(draw.textlength(label, font=get_font(32))) + 40
+            draw.rounded_rectangle((cx - text_width // 2, cy - 28, cx + text_width // 2, cy + 28),
+                                   radius=12, fill=tag_color)
+            draw.text((cx, cy), label, font=get_font(32), fill="white", anchor="mm")
+
+    rec_title = str(story_meta.get("series_tag", "ЗАПИСЬ № 01")).upper()[:26]
+    location = str(story_meta.get("location", "")).upper()[:34]
+    clock = str(scene.get("clock", "02:17"))
+    bpm = int(scene.get("bpm", 125)) + phase_step * 2
+    timer_label = str(scene.get("timer_label", "")).strip()
+    draw.ellipse((42, 52, 66, 76), fill=(230, 45, 45) if phase_step % 2 == 0 else (110, 25, 25))
+    draw.text((82, 64), f"REC   {rec_title}", font=get_font(28),
+              fill=(215, 220, 228), anchor="lm")
+    if location:
+        draw.text((540, 64), location, font=get_font(24),
+                  fill=(150, 160, 172), anchor="mm")
+    draw.text((WIDTH - 45, 64), clock, font=get_font(30), fill=(235, 115, 45), anchor="rm")
+    draw.rounded_rectangle((WIDTH - 255, 105, WIDTH - 42, 168), radius=12,
+                           fill=(14, 17, 22), outline=(210, 50, 50), width=3)
+    draw.text((WIDTH - 230, 136), "♥", font=get_font(34), fill=(225, 50, 50), anchor="lm")
+    draw.text((WIDTH - 60, 136), str(bpm), font=get_font(36), fill="white", anchor="rm")
+    if timer_label:
+        draw.rounded_rectangle((42, 105, 285, 168), radius=12,
+                               fill=(14, 17, 22), outline=(235, 115, 45), width=3)
+        draw.text((163, 136), timer_label.upper()[:18], font=get_font(30),
+                  fill="white", anchor="mm")
+
+    rule_badge = str(scene.get("rule_badge", "")).strip()
+    visual_detail = str(scene.get("visual_detail", "")).strip()
+    if rule_badge or visual_detail:
+        header = f"{rule_badge} · {visual_detail}".strip(" ·").upper()[:36]
+        box_width = max(int(draw.textlength(header, font=get_font(36))) + 64, 360)
+        draw.rounded_rectangle((540 - box_width // 2, 215, 540 + box_width // 2, 289),
+                               radius=14, fill=(18, 22, 28), outline=accent, width=4)
+        draw.text((540, 252), header, font=get_font(36), fill="white", anchor="mm")
+    environment_detail = str(scene.get("environment_detail", "")).strip()
+    if environment_detail:
+        draw.text((540, 315), environment_detail.upper()[:48],
+                  font=get_font(24), fill=(190, 198, 208), anchor="mm")
+
+    if show_choice is None:
+        show_choice = bool(scene.get("is_ending") or scene.get("is_choice_scene"))
+    choice_data = choice_source or scene
+    if show_choice:
+        choice_a = str(choice_data.get("choice_a") or "УБЕЖАТЬ").upper()[:16]
+        choice_b = str(choice_data.get("choice_b") or "ОСТАТЬСЯ").upper()[:16]
+        question = "ЧТО БЫ СДЕЛАЛ ТЫ? НАПИШИ В КОММЕНТАРИЯХ"
+        question_width = min(
+            WIDTH - 80,
+            int(draw.textlength(question, font=get_font(30))) + 40,
+        )
+        draw.rounded_rectangle(
+            (540 - question_width // 2, 970, 540 + question_width // 2, 1030),
+            radius=10, fill=(14, 18, 24), outline=accent, width=3,
+        )
+        draw.text((540, 1000), question, font=get_font(30),
+                  fill=(255, 205, 95), anchor="mm")
+        for box, label, color in (
+            ((100, 1060, 510, 1220), f"1. {choice_a}", (215, 48, 48)),
+            ((570, 1060, 980, 1220), f"2. {choice_b}", (42, 145, 95)),
+        ):
+            draw.rounded_rectangle(box, radius=20, fill=color, outline="white", width=4)
+            draw.text(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2),
+                      label, font=get_font(42), fill="white", anchor="mm")
+        timer_value = max(1, 3 - (phase_step % 3))
+        draw.rounded_rectangle((440, 1250, 640, 1310), radius=15, fill=accent)
+        draw.text((540, 1280), f"ГОЛОСУЙ: {timer_value} СЕК",
+                  font=get_font(32), fill="white", anchor="mm")
+        clock_cx, clock_cy, clock_r = 735, 1280, 36
+        draw.ellipse((clock_cx - clock_r, clock_cy - clock_r,
+                      clock_cx + clock_r, clock_cy + clock_r),
+                     fill=(18, 22, 28), outline=(255, 205, 95), width=4)
+        angle = (phase * math.tau) - math.pi / 2
+        hand_x = clock_cx + int(math.cos(angle) * 25)
+        hand_y = clock_cy + int(math.sin(angle) * 25)
+        draw.line((clock_cx, clock_cy, hand_x, hand_y), fill="white", width=5)
+        draw.ellipse((clock_cx - 5, clock_cy - 5, clock_cx + 5, clock_cy + 5),
+                     fill=(255, 205, 95))
+
+    callout = str(scene.get("callout", "")).strip()
+    if callout and not show_choice:
+        label = callout.upper()[:34]
+        draw.rounded_rectangle((70, 1080, 1010, 1150), radius=16,
+                               fill=(18, 22, 28), outline=accent, width=3)
+        draw.text((540, 1115), label, font=get_font(30), fill=(255, 220, 135),
+                  anchor="mm")
+
+    if words:
+        lines: list[list[tuple[int, str]]] = [[]]
+        for index, word in enumerate(words):
+            if sum(len(item[1]) + 1 for item in lines[-1]) + len(word) > 20 and lines[-1]:
+                lines.append([])
+            lines[-1].append((index, word))
+        font_sub = get_font(58)
+        base_y = 1360
+        for line in lines[-3:]:
+            widths = [int(draw.textlength(word.upper(), font=font_sub)) for _, word in line]
+            spacing = 18
+            start_x = 540 - (sum(widths) + spacing * (len(line) - 1)) // 2
+            for (word_index_value, word), width in zip(line, widths):
+                color = (245, 130, 45) if word_index_value == word_index else "white"
+                draw.text((start_x + width // 2, base_y), word.upper(), font=font_sub,
+                          fill=color, anchor="mm", stroke_width=6, stroke_fill=(8, 10, 14))
+                start_x += width + spacing
+            base_y += 82
+    return image
+
+
+def generate_story(
+    state_override: dict[str, Any] | None = None,
+    final_for_video: bool = False,
+) -> dict[str, Any]:
+    state_file = BASE_DIR / "series_state.json"
+    state: dict[str, Any] = dict(state_override or {})
+    if state_override is None and state_file.exists():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+
+    if "story_id" not in state:
+        state["story_id"] = random.randint(10, 99)
+    selected_choice = os.getenv("VIEWER_CHOICE", "").strip().lower()
+    if selected_choice in {"a", "b", "1", "2"}:
+        selected_choice = "a" if selected_choice in {"a", "1"} else "b"
+        state["selected_choice"] = selected_choice
+    ep = int(state.get("episode", 0)) + 1
+    tot = int(state.get("total_episodes", 0))
+    if ep > tot or tot < 3:
+        tot = random.randint(3, 5)
+        ep = 1
+        state = {
+            "story_id": random.randint(10, 99),
+            "title": "",
+            "episode": 1,
+            "total_episodes": tot,
+            "prev_cliffhanger": ""
+        }
+
+    print(f"🤖 [1/5] ИИ генерирует уникальный сериал (Эпизод {ep} из {tot})...")
+    recent_locations = state.get("recent_locations", [])
+    recent_titles = state.get("recent_titles", [])
+    continuity = (
+        f"Это СЕРИЯ {ep} из {tot}. Первая сцена ОБЯЗАНА прямо продолжать финал прошлой серии: "
+        f"«{state.get('prev_cliffhanger', '')}». Возможные направления начала: "
+        f"{state.get('possible_openings', [])}. Предыдущие ветки выбора: "
+        f"{state.get('choice_branches', {})}. Выбор зрителей: "
+        f"{state.get('selected_choice', 'ещё не выбран')}."
+        if ep > 1 else
+        f"Это СЕРИЯ 1 из {tot}. Придумай СОВЕРШЕННО СЕКРЕТНУЮ, жуткую и оригинальную тему выживания с нуля. "
+        "Никаких повторов — выбери уникальную локацию."
+    )
+    exclusion = (
+        f"Не используй повторно эти локации: {', '.join(map(str, recent_locations[-8:]))}. "
+        f"Не повторяй эти названия: {', '.join(map(str, recent_titles[-8:]))}."
+        if recent_locations or recent_titles else
+        "Выбери локацию и название, которых раньше не было."
+    )
+    ending_instruction = (
+        "Это финал всего выпуска. Только в 9-й сцене задай вопрос «А что бы сделал ты?» "
+        "и заполни choice_a и choice_b."
+        if final_for_video else
+        "Это промежуточный акт выпуска. Не добавляй голосование и вопрос зрителю; "
+        "закончи сильным клиффхэнгером для следующего акта."
+    )
+    prompt = f"""
+Ты — гениальный хоррор-шоураннер, который создает вирусные многосерийные истории для TikTok и Shorts.
+{continuity}
+{exclusion}
+{ending_instruction}
+Уникальный seed выпуска: {random.randint(100000, 999999)}.
+Каждая сцена должна иметь визуально конкретный фон, соответствующий действию: укажи
+environment_detail (3-8 слов), background_scene (5-12 слов) и
+background_objects (2-4 конкретных объекта), а template выбирай по месту действия,
+а не случайно.
+Меняй локацию, время суток, палитру, архитектуру и предметы; не используй автобус,
+лес или комнату по умолчанию, если этого нет в сюжете.
+Для каждой из 9 сцен (тайминги: 0-5, 5-10, 10-16, 16-22, 22-28, 28-34, 34-40, 40-45, 45-50)
+сгенерируй текст озвучки, bg_top, bg_bottom, accent_color, clock, bpm, timer_label,
+rule_badge, visual_detail, callout, speech и один template из списка:
+city_flash, room_window, broken_window, car_inside, car_outside, car_trunk,
+phone_closeup, map_plan, basement_crowd, radio_kit.
+Пиши текст специально для эмоциональной озвучки ElevenLabs: используй многоточия
+для нервных пауз, КАПС для коротких акцентов и восклицания там, где герой пугается.
+Не превращай весь текст в капс и не добавляй служебные пояснения в озвучку.
+{ending_instruction}
+
+Верни ТОЛЬКО валидный JSON:
+{{
+  "title": "Уникальное название истории",
+  "location": "Конкретная локация и время суток",
+  "cliffhanger_summary": "Описание финальной секунды 9-й сцены",
+  "next_opening": "Возможное начало следующего акта",
+  "possible_openings": ["Вариант начала А", "Вариант начала Б"],
+  "choice_branches": {{
+    "a": "Как продолжится история, если зритель выберет A",
+    "b": "Как продолжится история, если зритель выберет B"
+  }},
+  "scenes": [
+    {{
+      "timing": "0-5",
+      "text": "Текст озвучки",
+      "bg_top": [20, 24, 32],
+      "bg_bottom": [10, 12, 16],
+      "accent_color": [235, 115, 45],
+      "template": "room_window",
+      "environment_detail": "мокрый перрон и красные сигнальные огни",
+      "background_scene": "заброшенная станция метро после отключения света",
+      "background_objects": ["ржавые рельсы", "мигающий указатель", "лужи"],
+      "clock": "03:15",
+      "bpm": 130,
+      "timer_label": "ОСТАЛОСЬ 30 С",
+      "rule_badge": "ПРАВИЛО 1",
+      "visual_detail": "НЕ СМОТРИ НА ЗЕРКАЛО",
+      "callout": "ДВЕРИ ЗАБЛОКИРОВАНЫ",
+      "speech": "ОТКРОЙТЕ!"
+      ,"is_ending": false,
+      "is_choice_scene": false,
+      "choice_a": "",
+      "choice_b": ""
+    }}
+  ]
+}}
+Ровно 9 сцен. Поставь is_ending и is_choice_scene в true только если это финал выпуска.
+"""
+    allowed_visuals = {
+        "locked_door", "bus_forest", "emergency_valve", "crowd_run",
+        "hands_slip", "infected_close", "hug_tree", "key_hand",
+        "padlock_chain", "building_pipes", "choice",
+    }
+    try:
+        response = gemini_client.models.generate_content(
+            model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        data: Any = json.loads(response.text)
+        scenes = data.get("scenes") if isinstance(data, dict) else None
+        if not isinstance(scenes, list) or len(scenes) != 9:
+            raise ValueError("Gemini вернул не 9 сцен")
+
+        expected_timings = ("0-5", "5-10", "10-16", "16-22", "22-28",
+                            "28-34", "34-40", "40-45", "45-50")
+        allowed_templates = {
+            "city_flash", "room_window", "broken_window", "car_inside",
+            "car_outside", "car_trunk", "phone_closeup", "map_plan",
+            "basement_crowd", "radio_kit",
+        }
+        for index, scene in enumerate(scenes):
+            if not isinstance(scene, dict):
+                raise ValueError("Некорректная сцена")
+            timing = str(scene.get("timing", "")).replace(" ", "")
+            if timing != expected_timings[index]:
+                raise ValueError(f"Некорректный тайминг сцены {index + 1}")
+            scene["timing"] = expected_timings[index]
+            scene["text"] = str(scene.get("text", "")).strip()
+            if not scene["text"]:
+                raise ValueError(f"Пустой текст сцены {index + 1}")
+            if scene.get("template") not in allowed_templates:
+                scene["template"] = "room_window"
+            scene["is_ending"] = final_for_video and index == 8
+            scene["is_choice_scene"] = final_for_video and index == 8
+            scene["choice_a"] = (
+                str(scene.get("choice_a") or "УБЕЖАТЬ").strip()[:24]
+                if index == 8 else ""
+            )
+            scene["choice_b"] = (
+                str(scene.get("choice_b") or "ОСТАТЬСЯ").strip()[:24]
+                if index == 8 else ""
+            )
+            if index == 8 and not scene["text"].endswith("А что бы сделал ты?"):
+                scene["text"] = f"{scene['text'].rstrip()} А что бы сделал ты?"
+            scene["bg_top"] = _rgb(scene.get("bg_top"), (22, 26, 34))
+            scene["bg_bottom"] = _rgb(scene.get("bg_bottom"), (10, 13, 18))
+            scene["accent_color"] = _rgb(scene.get("accent_color"), (235, 115, 45))
+            scene["environment_detail"] = str(
+                scene.get("environment_detail") or scene.get("visual_detail") or "тёмное помещение"
+            ).strip()[:80]
+            scene["background_scene"] = str(
+                scene.get("background_scene") or scene["environment_detail"]
+            ).strip()[:120]
+            objects = scene.get("background_objects", [])
+            if isinstance(objects, list):
+                scene["background_objects"] = [str(item).strip()[:40] for item in objects[:4]]
+            else:
+                scene["background_objects"] = []
+        base_title = str(data.get("title") or "Запись выживания").split("—")[0].strip()
+        full_title = f"{base_title} — Часть {ep}/{tot}"
+        state.update({
+            "title": base_title,
+            "episode": ep,
+            "total_episodes": tot,
+            "prev_cliffhanger": str(data.get("cliffhanger_summary", scenes[-1].get("text", ""))),
+            "next_opening": str(data.get("next_opening", scenes[0].get("text", ""))),
+            "possible_openings": data.get("possible_openings", []),
+            "choice_branches": data.get("choice_branches", {}),
+            "selected_choice": state.get("selected_choice"),
+            "pending_choice": {
+                "question": "А что бы сделал ты?",
+                "choice_a": scenes[-1]["choice_a"],
+                "choice_b": scenes[-1]["choice_b"],
+            } if final_for_video else None,
+        })
+        state["recent_locations"] = (recent_locations + [str(data.get("location", ""))])[-8:]
+        state["recent_titles"] = (recent_titles + [base_title])[-8:]
+        return {
+            "title": full_title,
+            "series_tag": f"ЗАПИСЬ № {state['story_id']} · ЧАСТЬ {ep}/{tot}",
+            "episode": ep,
+            "total_episodes": tot,
+            "location": str(data.get("location", "ЛОКАЦИЯ НЕ УКАЗАНА")),
+            "scenes": scenes,
+            "_pending_state": state,
+        }
+    except Exception as error:
+        print(f"⚠️ Gemini не ответил вовремя или недоступен ({error}); используем резервную историю.")
+        fallback = dict(FALLBACK_STORY)
+        fallback["scenes"] = [dict(scene) for scene in FALLBACK_STORY["scenes"]]
+        if not fallback["scenes"][-1]["text"].endswith("А что бы сделал ты?"):
+            fallback["scenes"][-1]["text"] = (
+                f"{fallback['scenes'][-1]['text'].rstrip()} А что бы сделал ты?"
+            )
+        fallback["scenes"][-1].update({
+            "is_ending": True,
+            "is_choice_scene": True,
+            "choice_a": "ОТКРЫТЬ",
+            "choice_b": "ОСТАТЬСЯ",
+        })
+        fallback["_pending_state"] = {
+            "story_id": state.get("story_id", random.randint(10, 99)),
+            "title": fallback["title"],
+            "episode": int(state.get("episode", 0)) or 1,
+            "total_episodes": int(state.get("total_episodes", 1)) or 1,
+            "prev_cliffhanger": fallback["scenes"][-1]["text"],
+            "next_opening": fallback["scenes"][0]["text"],
+            "possible_openings": [fallback["scenes"][0]["text"]],
+            "choice_branches": {
+                "a": "Открытая дверь ведёт в тёмный подвал.",
+                "b": "Ожидание позволяет заражённому найти героя.",
+            },
+            "pending_choice": {
+                "question": "А что бы сделал ты?",
+                "choice_a": "ОТКРЫТЬ",
+                "choice_b": "ОСТАТЬСЯ",
+            },
+        }
+        return fallback
+
+
+def generate_voice(text: str, filename: str) -> Path:
+    path = AUDIO_DIR / filename
+    try:
+        stream = eleven_client.text_to_speech.convert(
+            text=text,
+            voice_id=os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
+            voice_settings=VoiceSettings(
+                stability=0.22,
+                similarity_boost=0.75,
+                style=0.78,
+                use_speaker_boost=True,
+            ),
+        )
+        with path.open("wb") as file:
+            for chunk in stream:
+                if chunk:
+                    file.write(chunk)
+    except Exception as error:
+        raise RuntimeError(f"Ошибка озвучки ElevenLabs: {error}") from error
+    return path
+
+
+def make_scene_clip(scene: dict[str, Any], story_meta: dict[str, Any], audio_path: Path | None,
+                    timestamp: str, scene_number: int,
+                    clips: list[Any], audio_clips: list[Any],
+                    duration_scale: float = 1.0,
+                    absolute_start: float = 0.0,
+                    choice_overlay_start: list[float] | None = None,
+                    choice_source: dict[str, Any] | None = None) -> None:
+    audio = None
+    if audio_path is not None:
+        source_audio = AudioFileClip(str(audio_path))
+        audio_clips.append(source_audio)
+        target_duration = get_scene_duration(scene) * max(duration_scale, 0.1)
+        if abs(source_audio.duration - target_duration) > 0.05:
+            audio = source_audio.with_speed_scaled(
+                factor=max(source_audio.duration / target_duration, 0.1)
+            )
+            audio_clips.append(audio)
+        else:
+            audio = source_audio
+    else:
+        scene_duration_for_clip = get_scene_duration(scene) * max(duration_scale, 0.1)
+
+    words = str(scene.get("text", "")).split()
+    duration = max(float(audio.duration), 0.1) if audio is not None else scene_duration_for_clip
+    if not words:
+        words = [""]
+    word_duration = duration / max(len(words), 1)
+    word_clips = []
+    for index, _ in enumerate(words):
+        frame = np.asarray(draw_scene(scene, story_meta, 0.0, index, words,
+                                      show_choice=False), dtype=np.uint8)
+        if frame.shape != (HEIGHT, WIDTH, 3) or not frame.any():
+            raise RuntimeError(f"Пустой кадр сцены {scene_number}, слово {index}")
+        segment_duration = (
+            word_duration
+            if index < len(words) - 1
+            else duration - word_duration * (len(words) - 1)
+        )
+        segment_start = index * word_duration
+
+        def make_frame(
+            t: float,
+            word_index: int = index,
+            clip_duration: float = segment_duration,
+            start_time: float = segment_start,
+        ) -> np.ndarray:
+            progress = min(max(float(t) / max(clip_duration, 0.001), 0.0), 1.0)
+            motion_phase = ((start_time + float(t)) / duration) * 4.0
+            absolute_time = absolute_start + start_time + float(t)
+            show_choice = (
+                choice_overlay_start is not None
+                and absolute_time >= choice_overlay_start[0]
+                and choice_source is not None
+            )
+            return np.asarray(
+                draw_scene(scene, story_meta, motion_phase, word_index, words,
+                           show_choice=show_choice, choice_source=choice_source),
+                dtype=np.uint8,
+            )
+
+        word_clips.append(VideoClip(
+            frame_function=make_frame,
+            duration=max(segment_duration, 0.001),
+        ))
+    base_clip = concatenate_videoclips(word_clips, method="compose")
+    # Keep video strictly inside the audio interval; never extend either side.
+    scene_duration = min(base_clip.duration, duration)
+    if base_clip.duration > scene_duration:
+        base_clip = base_clip.subclipped(0, scene_duration)
+    scene_clip = base_clip.with_audio(audio) if audio is not None else base_clip
+    clips.append(scene_clip)
+
+
+def build_single_short(index: int = 1) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stories: list[dict[str, Any]] = []
+    continuity_state: dict[str, Any] | None = None
+    for episode_number in range(EPISODES_PER_SHORT):
+        story = generate_story(
+            continuity_state,
+            final_for_video=episode_number == EPISODES_PER_SHORT - 1,
+        )
+        stories.append(story)
+        continuity_state = story.get("_pending_state")
+        print(
+            f"📜 Эпизод {episode_number + 1}/{EPISODES_PER_SHORT}: "
+            f"{story['title']} ({len(story['scenes'])} сцен)"
+        )
+    choice_overlay_start = [max(0.0, MAX_SHORT_SECONDS - 10.0)]
+    # Every act has a nominal 50-second timeline. Fit the complete release to
+    # the Shorts limit in both silent and voice modes.
+    duration_scale = MAX_SHORT_SECONDS / (EPISODES_PER_SHORT * 50.0)
+    clips: list[Any] = []
+    audio_clips: list[Any] = []
+    try:
+        voice_enabled = VOICE_ENABLED
+        print(
+            f"🎙️🎨 [2/5] Создаём {EPISODES_PER_SHORT} эпизода "
+            + ("с озвучкой..." if voice_enabled else "без озвучки...")
+        )
+        global_scene_number = 0
+        absolute_start = 0.0
+        final_choice_source = stories[-1]["scenes"][-1]
+        for episode_number, story in enumerate(stories, 1):
+            for scene_number, scene in enumerate(story["scenes"], 1):
+                global_scene_number += 1
+                audio_path = (
+                    generate_voice(
+                        scene["text"],
+                        f"{timestamp}_ep{episode_number}_scene{scene_number}.mp3",
+                    )
+                    if voice_enabled else None
+                )
+                make_scene_clip(
+                    scene, story, audio_path, timestamp,
+                    global_scene_number, clips, audio_clips,
+                    duration_scale=duration_scale,
+                    absolute_start=absolute_start,
+                    choice_overlay_start=choice_overlay_start,
+                    choice_source=final_choice_source,
+                )
+                absolute_start += clips[-1].duration
+
+        total_duration = sum(clip.duration for clip in clips)
+        if clips:
+            choice_overlay_start[0] = max(
+                0.0, min(total_duration, MAX_SHORT_SECONDS) - 10.0
+            )
+        if total_duration > MAX_SHORT_SECONDS:
+            print(
+                f"ℹ️ Длительность эпизодов {total_duration:.1f} секунд; "
+                f"ограничиваем до {MAX_SHORT_SECONDS}."
+            )
+        output_path = VIDEOS_DIR / f"survival_story_{timestamp}_{index}.mp4"
+        print(
+            f"🎬 [3/5] Рендерим вертикальное видео "
+            f"({min(total_duration, MAX_SHORT_SECONDS):.1f} сек.)..."
+        )
+        final_video = concatenate_videoclips(clips, method="compose")
+        if final_video.duration > MAX_SHORT_SECONDS:
+            final_video = final_video.subclipped(0, MAX_SHORT_SECONDS)
+            total_duration = MAX_SHORT_SECONDS
+        try:
+            final_video.write_videofile(str(output_path), fps=FPS, codec="libx264",
+                                        audio_codec="aac", preset="ultrafast", logger="bar")
+        finally:
+            final_video.close()
+        pending_state = stories[-1].get("_pending_state")
+        if isinstance(pending_state, dict):
+            pending_state["last_completed_video"] = output_path.name
+            pending_state["last_completed_at"] = datetime.now().isoformat(timespec="seconds")
+            pending_state["last_video_episodes"] = EPISODES_PER_SHORT
+            pending_state["next_video_opening"] = pending_state.get("next_opening", "")
+            (BASE_DIR / "series_state.json").write_text(
+                json.dumps(pending_state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        print(f"✅ Видео готово: {output_path}")
+    finally:
+        for clip in clips + audio_clips:
+            clip.close()
+
+    if os.getenv("UPLOAD_TO_YOUTUBE", "0").lower() in {"1", "true", "yes"}:
+        print("📤 [4/5] Загружаем ролик на YouTube...")
+        try:
+            from uploader import upload_short
+            upload_short(str(output_path), f"{stories[0]['title']} #shorts")
+        except Exception as error:
+            print(f"⚠️ Видео создано, но загрузка не выполнена: {error}")
+    else:
+        print("⏭️ [4/5] Загрузка на YouTube отключена (UPLOAD_TO_YOUTUBE=1 для включения).")
+    print("🏁 [5/5] Готово.")
+    return output_path
+
+
+if __name__ == "__main__":
+    for number in range(1, int(os.getenv("SHORTS_TO_GENERATE", "1")) + 1):
+        build_single_short(number)
+
+
+=== FILE: ./scripts/uploader.py ===
+import os
+import pickle
+from pathlib import Path
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request
+
+SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+BASE_DIR = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def get_authenticated_service():
+    """Авторизуется в YouTube API (при первом запуске откроет браузер для входа)"""
+    creds = None
+    token_path = BASE_DIR / "token.pickle"
+    client_secret_path = BASE_DIR / "client_secret.json"
+
+    if token_path.exists():
+        with open(token_path, "rb") as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not client_secret_path.exists():
+                client_secret_path = SCRIPT_DIR / "client_secret.json"
+            if not client_secret_path.exists():
+                raise FileNotFoundError(
+                    f"❌ Не найден client_secret.json в {BASE_DIR} или {SCRIPT_DIR}."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+
+        with open(token_path, "wb") as token:
+            pickle.dump(creds, token)
+
+    return build("youtube", "v3", credentials=creds)
+
+
+def upload_short(video_path: str, title: str, description: str = "#shorts #ai #quiz #makeiteasyai"):
+    """Загружает готовый файл на YouTube"""
+    youtube = get_authenticated_service()
+
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": ["shorts", "ai", "quiz", "makeiteasyai"],
+            "categoryId": "28"  # Наука и технологии
+        },
+        "status": {
+            "privacyStatus": os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
+            "selfDeclaredMadeForKids": False
+        }
+    }
+
+    media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+
+    print(f"📤 Заливаем на YouTube: {title}...")
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media
+    )
+
+    response = None
+    while response is None:
+        status, response = request.next_chunk()
+        if status:
+            print(f"⏳ Загрузка: {int(status.progress() * 100)}%")
+
+    print(f"🎉 Успешно залито! Ссылка: https://youtu.be/{response['id']}")
+    return response['id']
+
+
+=== FILE: ./scripts/generate_short.py ===
+"""Legacy demo pipeline.
+
+The production horror-series pipeline is ``main-pipeline.py``. This file is
+kept only as an old gTTS/MoviePy experiment and is not part of production.
+"""
+
+from pathlib import Path
+from gtts import gTTS
+from PIL import Image, ImageDraw
+from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+
+# Определяем корень проекта и нужные папки независимо от того, откуда запущен скрипт
+BASE_DIR = Path(__file__).resolve().parent.parent
+IMAGES_DIR = BASE_DIR / "assets" / "images"
+AUDIO_DIR = BASE_DIR / "output" / "audio"
+VIDEOS_DIR = BASE_DIR / "output" / "videos"
+
+def create_test_images():
+    """Создает 2 тестовые картинки 1080x1920, если их еще нет в assets/images"""
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    slides = [
+        (IMAGES_DIR / "slide1.png", (255, 87, 34), "SLIDE 1: HOOK"),
+        (IMAGES_DIR / "slide2.png", (41, 121, 255), "SLIDE 2: ANSWER")
+    ]
+    image_paths = []
+    for path, color, label in slides:
+        if not path.exists():
+            img = Image.new("RGB", (1080, 1920), color=color)
+            draw = ImageDraw.Draw(img)
+            draw.text((350, 930), label, fill="white")
+            img.save(path)
+        image_paths.append(str(path))
+    return image_paths
+
+def generate_short(image_paths, text_script, output_name="first_short.mp4"):
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+
+    audio_path = AUDIO_DIR / "voice.mp3"
+    output_video_path = VIDEOS_DIR / output_name
+
+    print("🎙️ 1/3 Генерируем озвучку...")
+    tts = gTTS(text=text_script, lang="en", slow=False)
+    tts.save(str(audio_path))
+
+    audio_clip = AudioFileClip(str(audio_path))
+    slide_duration = audio_clip.duration / len(image_paths)
+
+    print("🎬 2/3 Собираем вертикальный видеоряд (9:16)...")
+    clips = []
+    for img_path in image_paths:
+        # Синтаксис под MoviePy 2.2.1 (.with_duration и .resized)
+        clip = (
+            ImageClip(img_path)
+            .with_duration(slide_duration)
+            .resized(height=1920)
+        )
+        clips.append(clip)
+
+    video = concatenate_videoclips(clips, method="compose").with_audio(audio_clip)
+
+    print("💾 3/3 Рендерим финальный MP4...")
+    video.write_videofile(
+        str(output_video_path),
+        fps=24,
+        codec="libx264",
+        audio_codec="aac"
+    )
+
+    audio_clip.close()
+    video.close()
+    print(f"✅ Готово! Открывай ролик: {output_video_path}")
+
+if __name__ == "__main__":
+    test_slides = create_test_images()
+    script_text = "Everything complex made simple! Welcome to Make It Easy Ai. Can you guess this game in 3 seconds?"
+    generate_short(test_slides, script_text)
+

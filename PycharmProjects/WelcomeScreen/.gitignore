@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Output & Cache (Cloud backed up to Google Drive)
+output/
+cache/
+*.mp4
+*.mp3
+*.wav
+*.png
+*.jpg
+temp_*
+*TEMP_MPY*
+
+# Secrets & Tokens
+.env
+token.pickle
+token.json
+client_secret.json
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
