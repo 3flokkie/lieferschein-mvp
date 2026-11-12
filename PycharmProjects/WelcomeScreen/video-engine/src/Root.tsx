@@ -7,10 +7,20 @@ import { AingeneerBragMovie } from "./AingeneerBragMovie";
 import { AingeneerHeroShowreel } from "./AingeneerHeroShowreel";
 import { AingeneerM1n9Showreel } from "./AingeneerM1n9Showreel";
 import { KitchenScene } from "./KitchenScene";
+import { RedditHorrorShort } from "./RedditHorrorShort";
+import { PaperCutRedditHorror } from "./PaperCutRedditHorror";
 
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="RedditHorrorShort"
+        component={RedditHorrorShort}
+        durationInFrames={1500} // 50s at 30fps
+        fps={30}
+        width={1080}
+        height={1920}
+      />
       <Composition
         id="HorrorPart4Movie"
         component={HorrorPart4Movie}
@@ -58,6 +68,14 @@ export const Root: React.FC = () => {
         fps={60}
         width={1920}
         height={1080}
+      />
+      <Composition
+        id="PaperCutRedditHorror"
+        component={PaperCutRedditHorror}
+        durationInFrames={3600} // 120s at 30fps
+        fps={30}
+        width={1080}
+        height={1920}
       />
       <Still
         id="KitchenPreview"
