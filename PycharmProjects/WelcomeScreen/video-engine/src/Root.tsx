@@ -9,10 +9,19 @@ import { AingeneerM1n9Showreel } from "./AingeneerM1n9Showreel";
 import { KitchenScene } from "./KitchenScene";
 import { RedditHorrorShort } from "./RedditHorrorShort";
 import { PaperCutRedditHorror } from "./PaperCutRedditHorror";
+import { Real911Reconstruction } from "./Real911Reconstruction";
 
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="Real911Reconstruction"
+        component={Real911Reconstruction}
+        durationInFrames={1635} // 54.5s at 30fps
+        fps={30}
+        width={1080}
+        height={1920}
+      />
       <Composition
         id="RedditHorrorShort"
         component={RedditHorrorShort}

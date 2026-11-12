@@ -20,7 +20,7 @@
   - Next step: Submit full Founders Hub profile at `foundershub.startups.microsoft.com` to upgrade to Level 1 ($1,000 credits) -> Level 2 ($5,000 credits) + free GitHub Enterprise + Microsoft 365 + Azure OpenAI.
 
 ## 3. Remote Control / Mobile Approval Bot
-- Bot: `@Aingeneerbot` (Token: `9174724584:AAF6gTX0BMYJ34ztmCxnevpOzA0v8K6m6k0`).
+- Bot: `@Aingeneerbot` (Token configured in local environment variable `TELEGRAM_BOT_TOKEN`).
 - Local bridge script: `/Users/sashasyrota/PycharmProjects/WelcomeScreen/scripts/telegram_approval_bridge.py`.
 - Running daemon on port 8765 (`/ask`, `/notify`, `/screen`).
 - User needs to click `/start` in `@Aingeneerbot` to pair iPhone.
