@@ -1,175 +1,53 @@
 import React, { useMemo } from "react";
 import {
   AbsoluteFill,
-  interpolate,
   useCurrentFrame,
   Audio,
   staticFile,
-  spring,
 } from "remotion";
 
-// Subtitle timeline calibrated for the 118-second narration
+// Exact Word-Level Timestamps from ElevenLabs alignment
 interface StorySubtitle {
   start: number;
   end: number;
-  speaker: "NARRATOR" | "PRINCE" | "FOX";
+  speaker: "СКАЗКА" | "МАЛЕНЬКИЙ ПРИНЦ" | "ЛИС";
   text: string;
 }
 
 const SUBTITLES: StorySubtitle[] = [
-  // ACT 1: Asteroid B-612 & Rose (0 - 24s)
-  {
-    start: 0.0,
-    end: 4.8,
-    speaker: "NARRATOR",
-    text: "Среди миллиардов холодных звёзд кружился крошечный астероид Б-612.",
-  },
-  {
-    start: 4.9,
-    end: 8.8,
-    speaker: "NARRATOR",
-    text: "На нём жил маленький принц с золотыми волосами.",
-  },
-  {
-    start: 8.9,
-    end: 14.5,
-    speaker: "NARRATOR",
-    text: "Каждое утро он аккуратно прочищал жерла трёх своих вулканов...",
-  },
-  {
-    start: 14.6,
-    end: 19.5,
-    speaker: "NARRATOR",
-    text: "И бережно выпалывал корни баобабов, чтобы они не разорвали планету на части.",
-  },
-  {
-    start: 19.6,
-    end: 24.5,
-    speaker: "NARRATOR",
-    text: "Он был совсем один, пока однажды из зерна не распустилась прекрасная Роза.",
-  },
-  {
-    start: 24.6,
-    end: 29.5,
-    speaker: "NARRATOR",
-    text: "Но принц был слишком юн и ещё не умел любить её по-настоящему.",
-  },
-
-  // ACT 2: Journey & Meeting the Fox (29.6 - 55s)
-  {
-    start: 29.6,
-    end: 35.8,
-    speaker: "NARRATOR",
-    text: "В поисках ответов принц обошёл множество миров, пока не опустился на Землю.",
-  },
-  {
-    start: 35.9,
-    end: 40.5,
-    speaker: "NARRATOR",
-    text: "Там, под кроной старой яблони, он встретил дикого Лиса.",
-  },
-  {
-    start: 40.6,
-    end: 44.5,
-    speaker: "PRINCE",
-    text: "— Поиграй со мной, — попросил мальчик. — Мне так грустно...",
-  },
-  {
-    start: 44.6,
-    end: 49.0,
-    speaker: "FOX",
-    text: "— Я не могу играть с тобой, — ответил Лис. — Я ещё не приручен.",
-  },
-  {
-    start: 49.1,
-    end: 52.5,
-    speaker: "PRINCE",
-    text: "— А что значит... «приручить»?",
-  },
-  {
-    start: 52.6,
-    end: 56.5,
-    speaker: "FOX",
-    text: "— Это значит — создать невидимые сердечные узы.",
-  },
-
-  // ACT 3: The Golden Wheat Fields & Becoming Unique (56.6 - 86s)
-  {
-    start: 56.6,
-    end: 63.5,
-    speaker: "FOX",
-    text: "— Для меня ты пока всего лишь мальчик, такой же, как сто тысяч других мальчиков.",
-  },
-  {
-    start: 63.6,
-    end: 69.5,
-    speaker: "FOX",
-    text: "И ты мне не нужен. А я для тебя — лишь рыжая лисица.",
-  },
-  {
-    start: 69.6,
-    end: 75.5,
-    speaker: "FOX",
-    text: "Но если ты приручишь меня... мы станем нужны друг другу.",
-  },
-  {
-    start: 75.6,
-    end: 80.5,
-    speaker: "FOX",
-    text: "Во всей Вселенной ты будешь для меня единственным.",
-  },
-  {
-    start: 80.6,
-    end: 87.5,
-    speaker: "FOX",
-    text: "Видишь вдали золотые поля пшеницы? Я не ем хлеба, и колосья мне ни о чём не говорили.",
-  },
-  {
-    start: 87.6,
-    end: 93.5,
-    speaker: "FOX",
-    text: "Но у тебя золотые волосы. И теперь даже шум ветра в спелой пшенице будет напоминать мне о тебе.",
-  },
-
-  // ACT 4: The Parting & The Great Secret (93.6 - 110s)
-  {
-    start: 93.6,
-    end: 98.0,
-    speaker: "NARRATOR",
-    text: "И Маленький принц приручил Лиса. А когда настал час прощания, Лис заплакал.",
-  },
-  {
-    start: 98.1,
-    end: 102.5,
-    speaker: "PRINCE",
-    text: "— Ты сам виноват... Я ведь не хотел делать тебе больно.",
-  },
-  {
-    start: 102.6,
-    end: 107.5,
-    speaker: "FOX",
-    text: "— Мне стало лучше. Вспомни о золоте спелой пшеницы.",
-  },
-  {
-    start: 107.6,
-    end: 112.5,
-    speaker: "FOX",
-    text: "Зорко одно лишь сердце. Самого главного глазами не увидишь.",
-  },
-
-  // ACT 5: Finale & Responsibility (112.6 - 120s)
-  {
-    start: 112.6,
-    end: 116.5,
-    speaker: "PRINCE",
-    text: "— Моя Роза так дорога мне потому, что я отдал ей столько дней своей жизни.",
-  },
-  {
-    start: 116.6,
-    end: 120.0,
-    speaker: "FOX",
-    text: "«Ты навсегда в ответе за всех, кого однажды приручил.»",
-  },
+  { start: 0.0, end: 1.81, speaker: "СКАЗКА", text: "Среди миллиардов холодных звёзд" },
+  { start: 2.02, end: 3.65, speaker: "СКАЗКА", text: "кружился крошечный астероид Б-612." },
+  { start: 3.74, end: 7.2, speaker: "СКАЗКА", text: "На нём жил мальчик с золотыми волосами." },
+  { start: 7.23, end: 10.28, speaker: "СКАЗКА", text: "Каждое утро он аккуратно чистил жерла" },
+  { start: 10.34, end: 13.8, speaker: "СКАЗКА", text: "своих вулканов и выпалывал ростки баобабов." },
+  { start: 14.19, end: 16.3, speaker: "СКАЗКА", text: "Он был совсем один, пока однажды" },
+  { start: 16.34, end: 19.05, speaker: "СКАЗКА", text: "не распустилась прекрасная Роза." },
+  { start: 19.11, end: 20.83, speaker: "СКАЗКА", text: "Но принц был слишком юн" },
+  { start: 20.87, end: 23.43, speaker: "СКАЗКА", text: "и ещё не умел любить её." },
+  { start: 23.48, end: 25.67, speaker: "СКАЗКА", text: "В поисках ответов принц опустился на Землю." },
+  { start: 25.69, end: 28.77, speaker: "СКАЗКА", text: "И там, под яблоней, встретил дикого Лиса." },
+  { start: 28.82, end: 30.86, speaker: "МАЛЕНЬКИЙ ПРИНЦ", text: "— Поиграй со мной, — попросил мальчик." },
+  { start: 30.92, end: 32.48, speaker: "МАЛЕНЬКИЙ ПРИНЦ", text: "— Мне так грустно..." },
+  { start: 32.53, end: 34.5, speaker: "ЛИС", text: "— Я не могу, — ответил Лис." },
+  { start: 34.62, end: 36.4, speaker: "ЛИС", text: "— Я ещё не приручен." },
+  { start: 36.47, end: 38.54, speaker: "МАЛЕНЬКИЙ ПРИНЦ", text: "— А что значит приручить?" },
+  { start: 38.59, end: 40.88, speaker: "ЛИС", text: "— Это значит — создать невидимые узы." },
+  { start: 41.05, end: 43.19, speaker: "ЛИС", text: "Для меня ты пока лишь маленький мальчик," },
+  { start: 43.28, end: 45.43, speaker: "ЛИС", text: "точно такой же, как сто тысяч других." },
+  { start: 45.81, end: 47.47, speaker: "ЛИС", text: "А я для тебя — лишь рыжая лисица." },
+  { start: 47.53, end: 50.51, speaker: "ЛИС", text: "Но если ты приручишь меня..." },
+  { start: 51.02, end: 53.38, speaker: "ЛИС", text: "мы станем нужны друг другу." },
+  { start: 53.42, end: 55.91, speaker: "ЛИС", text: "Видишь вдали золотые поля пшеницы?" },
+  { start: 55.96, end: 58.18, speaker: "ЛИС", text: "У тебя золотые волосы." },
+  { start: 58.23, end: 60.77, speaker: "ЛИС", text: "И теперь даже шум ветра в спелой пшенице" },
+  { start: 60.81, end: 62.85, speaker: "ЛИС", text: "будет напоминать мне о тебе." },
+  { start: 62.91, end: 65.11, speaker: "СКАЗКА", text: "А на прощание Лис открыл ему секрет:" },
+  { start: 65.32, end: 67.01, speaker: "ЛИС", text: "— Зорко одно лишь сердце." },
+  { start: 67.26, end: 69.29, speaker: "ЛИС", text: "Самого главного глазами не увидишь." },
+  { start: 69.73, end: 71.7, speaker: "МАЛЕНЬКИЙ ПРИНЦ", text: "Твоя Роза так дорога тебе потому," },
+  { start: 71.82, end: 74.28, speaker: "МАЛЕНЬКИЙ ПРИНЦ", text: "что ты отдал ей столько дней своей жизни." },
+  { start: 74.66, end: 76.18, speaker: "ЛИС", text: "Ты навсегда в ответе за всех," },
+  { start: 76.21, end: 78.5, speaker: "ЛИС", text: "кого однажды приручил." }
 ];
 
 export const LittlePrincePaperCut: React.FC = () => {
@@ -186,7 +64,6 @@ export const LittlePrincePaperCut: React.FC = () => {
   const breath = Math.sin(frame * 0.05) * 3;
   const scarfWave = Math.sin(frame * 0.12) * 8;
   const foxTailWag = Math.sin(frame * 0.08) * 6;
-  const wheatWave = Math.sin(frame * 0.07);
 
   // Soft Cotton Paper Aesthetic Palette
   const paperColors = {
@@ -203,17 +80,15 @@ export const LittlePrincePaperCut: React.FC = () => {
     roseStem: "#588157",
     foxOrange: "#e76f51",
     foxCream: "#fefae0",
-    wheatGold1: "#e9c46a",
-    wheatGold2: "#f4a261",
     sunWarmth: "#ffe3a8",
   };
 
   // Determine current active visual scene:
-  // Scene 1: 0 - 29.5s -> Asteroid B-612 & The Rose in space
-  // Scene 2: 29.5 - 56.5s -> Meeting under the Apple Tree on Earth
-  // Scene 3: 56.5 - 93.5s -> Vast Golden Wheat Fields waving in the wind
-  // Scene 4: 93.5 - 112.5s -> Sunset Parting & "Зорко одно лишь сердце"
-  // Scene 5: 112.5 - 120s -> Night Sky, Stars, B-612 & Golden Final Quote
+  // Scene 1: 0 - 23.4s -> Asteroid B-612 & The Rose in space
+  // Scene 2: 23.4 - 41.0s -> Meeting under the Apple Tree on Earth
+  // Scene 3: 41.0 - 62.9s -> Vast Golden Wheat Fields waving in the wind
+  // Scene 4: 62.9 - 69.5s -> Sunset Parting & "Зорко одно лишь сердце"
+  // Scene 5: 69.5 - 80.0s -> Night Sky, Stars, B-612 & Golden Final Quote
 
   return (
     <AbsoluteFill
@@ -223,15 +98,15 @@ export const LittlePrincePaperCut: React.FC = () => {
         overflow: "hidden",
       }}
     >
-      {/* 1. MASTER AUDIO TRACK */}
-      <Audio src={staticFile("little_prince/story_voice.mp3")} />
+      {/* 1. MASTER ELEVENLABS AUDIO TRACK */}
+      <Audio src={staticFile("little_prince/eleven_story.mp3")} />
 
       {/* 2. PAPER CUTOUT SCENE STACK */}
       <AbsoluteFill>
         {/* ============================================================ */}
-        {/* SCENE 1: ASTEROID B-612 & THE ROSE (0 - 29.5s) */}
+        {/* SCENE 1: ASTEROID B-612 & THE ROSE (0 - 23.4s) */}
         {/* ============================================================ */}
-        {time < 29.5 && (
+        {time < 23.4 && (
           <AbsoluteFill
             style={{
               background: "radial-gradient(ellipse at 50% 30%, #1c2541 0%, #080c18 100%)",
@@ -276,7 +151,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               }}
             />
 
-            {/* Asteroid B-612 (Spherical layered Paper Cutout) */}
+            {/* Asteroid B-612 */}
             <div
               style={{
                 position: "absolute",
@@ -316,7 +191,7 @@ export const LittlePrincePaperCut: React.FC = () => {
                 }}
               />
 
-              {/* Volcano 1 */}
+              {/* Volcano */}
               <div
                 style={{
                   position: "absolute",
@@ -342,7 +217,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                 alignItems: "center",
               }}
             >
-              {/* Glass Dome */}
               <div
                 style={{
                   width: 140,
@@ -420,7 +294,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   zIndex: 3,
                 }}
               >
-                {/* Hair Spikes */}
                 <div
                   style={{
                     position: "absolute",
@@ -510,15 +383,15 @@ export const LittlePrincePaperCut: React.FC = () => {
         )}
 
         {/* ============================================================ */}
-        {/* SCENE 2: MEETING UNDER THE APPLE TREE (29.5 - 56.5s) */}
+        {/* SCENE 2: MEETING UNDER THE APPLE TREE (23.4 - 41.0s) */}
         {/* ============================================================ */}
-        {time >= 29.5 && time < 56.5 && (
+        {time >= 23.4 && time < 41.0 && (
           <AbsoluteFill
             style={{
               background: "linear-gradient(180deg, #d8e2dc 0%, #ffe5d9 60%, #faedcd 100%)",
             }}
           >
-            {/* Distant Hills (Paper Cut Layers) */}
+            {/* Distant Hills */}
             <div
               style={{
                 position: "absolute",
@@ -544,7 +417,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               }}
             />
 
-            {/* Earth Ground Paper Hill */}
+            {/* Earth Ground */}
             <div
               style={{
                 position: "absolute",
@@ -558,7 +431,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               }}
             />
 
-            {/* Big Stylized Apple Tree */}
+            {/* Apple Tree */}
             <div
               style={{
                 position: "absolute",
@@ -569,7 +442,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                 alignItems: "center",
               }}
             >
-              {/* Tree Crown (Paper Cloud Shapes) */}
               <div
                 style={{
                   width: 520,
@@ -583,7 +455,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   justifyContent: "center",
                 }}
               >
-                {/* Red Apples */}
                 {[
                   { x: 120, y: 150 },
                   { x: 340, y: 130 },
@@ -605,7 +476,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   />
                 ))}
               </div>
-              {/* Tree Trunk */}
               <div
                 style={{
                   width: 70,
@@ -618,7 +488,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               />
             </div>
 
-            {/* THE FOX (Cute Paper Cut Sitting Fox) */}
+            {/* THE FOX */}
             <div
               style={{
                 position: "absolute",
@@ -630,7 +500,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                 transform: `translateY(${breath * 0.7}px)`,
               }}
             >
-              {/* Fox Body */}
               <div
                 style={{
                   width: 140,
@@ -644,7 +513,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   alignItems: "center",
                 }}
               >
-                {/* White Chest Patch */}
                 <div
                   style={{
                     width: 70,
@@ -655,7 +523,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   }}
                 />
 
-                {/* Fox Head */}
                 <div
                   style={{
                     position: "absolute",
@@ -670,7 +537,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                     padding: "0 15px",
                   }}
                 >
-                  {/* Pointy Ears */}
                   <div
                     style={{
                       width: 32,
@@ -693,7 +559,7 @@ export const LittlePrincePaperCut: React.FC = () => {
                   />
                 </div>
 
-                {/* Bushy Tail (Layered behind) */}
+                {/* Bushy Tail */}
                 <div
                   style={{
                     position: "absolute",
@@ -708,7 +574,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                     transformOrigin: "bottom left",
                   }}
                 >
-                  {/* White tail tip */}
                   <div
                     style={{
                       position: "absolute",
@@ -736,7 +601,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                 transform: `scale(0.85) translateY(${breath * 0.5}px)`,
               }}
             >
-              {/* Golden Hair */}
               <div
                 style={{
                   width: 80,
@@ -746,7 +610,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   boxShadow: "0 6px 15px rgba(0,0,0,0.15)",
                 }}
               />
-              {/* Green/Blue Coat */}
               <div
                 style={{
                   width: 70,
@@ -762,15 +625,15 @@ export const LittlePrincePaperCut: React.FC = () => {
         )}
 
         {/* ============================================================ */}
-        {/* SCENE 3: VAST GOLDEN WHEAT FIELDS (56.5 - 93.5s) */}
+        {/* SCENE 3: VAST GOLDEN WHEAT FIELDS (41.0 - 62.9s) */}
         {/* ============================================================ */}
-        {time >= 56.5 && time < 93.5 && (
+        {time >= 41.0 && time < 62.9 && (
           <AbsoluteFill
             style={{
               background: "linear-gradient(180deg, #ffedd5 0%, #fed7aa 40%, #fef08a 100%)",
             }}
           >
-            {/* Big Warm Radiant Sun */}
+            {/* Radiant Sun */}
             <div
               style={{
                 position: "absolute",
@@ -799,7 +662,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               }}
             />
 
-            {/* Front Waving Golden Wheat Stalks (Loop) */}
+            {/* Waving Golden Wheat Stalks */}
             <div
               style={{
                 position: "absolute",
@@ -830,7 +693,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                       position: "relative",
                     }}
                   >
-                    {/* Wheat Grains */}
                     <div
                       style={{
                         position: "absolute",
@@ -848,7 +710,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               })}
             </div>
 
-            {/* Silhouettes of Prince and Fox together looking at wheat */}
+            {/* Silhouettes together */}
             <div
               style={{
                 position: "absolute",
@@ -860,7 +722,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                 gap: 50,
               }}
             >
-              {/* Fox Silhouette */}
               <div
                 style={{
                   width: 120,
@@ -870,7 +731,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                   boxShadow: "0 10px 25px rgba(0,0,0,0.2)",
                 }}
               />
-              {/* Prince Silhouette */}
               <div
                 style={{
                   width: 90,
@@ -898,33 +758,15 @@ export const LittlePrincePaperCut: React.FC = () => {
         )}
 
         {/* ============================================================ */}
-        {/* SCENE 4: SUNSET PARTING & "ЗОРКО ОДНО ЛИШЬ СЕРДЦЕ" (93.5 - 112.5s) */}
+        {/* SCENE 4: SUNSET PARTING & "ЗОРКО ОДНО ЛИШЬ СЕРДЦЕ" (62.9 - 69.5s) */}
         {/* ============================================================ */}
-        {time >= 93.5 && time < 112.5 && (
+        {time >= 62.9 && time < 69.5 && (
           <AbsoluteFill
             style={{
               background: "linear-gradient(180deg, #31103f 0%, #7c2d12 40%, #fb923c 100%)",
             }}
           >
-            {/* Dusk Stars Appearing */}
-            {[...Array(16)].map((_, i) => (
-              <div
-                key={i}
-                style={{
-                  position: "absolute",
-                  left: (i * 153.2) % 950 + 50,
-                  top: (i * 97.4) % 450 + 60,
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  backgroundColor: "#ffffff",
-                  opacity: 0.8,
-                  boxShadow: "0 0 10px #ffffff",
-                }}
-              />
-            ))}
-
-            {/* Glowing Heart Emblem (Paper Cut Layer) */}
+            {/* Glowing Heart Emblem */}
             <div
               style={{
                 position: "absolute",
@@ -951,7 +793,6 @@ export const LittlePrincePaperCut: React.FC = () => {
               />
             </div>
 
-            {/* Hill with Silhouettes */}
             <div
               style={{
                 position: "absolute",
@@ -968,9 +809,9 @@ export const LittlePrincePaperCut: React.FC = () => {
         )}
 
         {/* ============================================================ */}
-        {/* SCENE 5: FINALE & RESPONSIBILITY (112.5 - 120s) */}
+        {/* SCENE 5: FINALE & RESPONSIBILITY (69.5 - 80.0s) */}
         {/* ============================================================ */}
-        {time >= 112.5 && (
+        {time >= 69.5 && (
           <AbsoluteFill
             style={{
               background: "radial-gradient(circle at 50% 50%, #1e1b4b 0%, #030712 100%)",
@@ -981,7 +822,7 @@ export const LittlePrincePaperCut: React.FC = () => {
               padding: "100px 80px",
             }}
           >
-            {/* The Asteroid B-612 & Golden Rose shining bright in deep space */}
+            {/* The Asteroid B-612 & Golden Rose */}
             <div
               style={{
                 width: 320,
@@ -996,7 +837,6 @@ export const LittlePrincePaperCut: React.FC = () => {
                 position: "relative",
               }}
             >
-              {/* Glowing Rose */}
               <div
                 style={{
                   position: "absolute",
@@ -1073,20 +913,16 @@ export const LittlePrincePaperCut: React.FC = () => {
               borderRadius: 30,
               marginBottom: 12,
               backgroundColor:
-                currentSub.speaker === "PRINCE"
+                currentSub.speaker === "МАЛЕНЬКИЙ ПРИНЦ"
                   ? paperColors.princeCoat
-                  : currentSub.speaker === "FOX"
+                  : currentSub.speaker === "ЛИС"
                   ? paperColors.foxOrange
                   : "#475569",
               color: "#ffffff",
               boxShadow: "0 6px 18px rgba(0,0,0,0.3)",
             }}
           >
-            {currentSub.speaker === "PRINCE"
-              ? "МАЛЕНЬКИЙ ПРИНЦ"
-              : currentSub.speaker === "FOX"
-              ? "ЛИС"
-              : "СКАЗКА"}
+            {currentSub.speaker}
           </div>
 
           {/* Subtitle Card (Warm Paper Texture Feel) */}

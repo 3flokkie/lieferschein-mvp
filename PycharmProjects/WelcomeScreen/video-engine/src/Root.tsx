@@ -18,7 +18,7 @@ export const Root: React.FC = () => {
       <Composition
         id="LittlePrincePaperCut"
         component={LittlePrincePaperCut}
-        durationInFrames={3600} // 120s at 30fps
+        durationInFrames={2340} // 78s at 30fps (ElevenLabs master duration)
         fps={30}
         width={1080}
         height={1920}
