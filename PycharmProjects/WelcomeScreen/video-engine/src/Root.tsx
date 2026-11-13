@@ -10,10 +10,19 @@ import { KitchenScene } from "./KitchenScene";
 import { RedditHorrorShort } from "./RedditHorrorShort";
 import { PaperCutRedditHorror } from "./PaperCutRedditHorror";
 import { Real911Reconstruction } from "./Real911Reconstruction";
+import { LittlePrincePaperCut } from "./LittlePrincePaperCut";
 
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="LittlePrincePaperCut"
+        component={LittlePrincePaperCut}
+        durationInFrames={3600} // 120s at 30fps
+        fps={30}
+        width={1080}
+        height={1920}
+      />
       <Composition
         id="Real911Reconstruction"
         component={Real911Reconstruction}
