@@ -11,15 +11,33 @@ import { RedditHorrorShort } from "./RedditHorrorShort";
 import { PaperCutRedditHorror } from "./PaperCutRedditHorror";
 import { Real911Reconstruction } from "./Real911Reconstruction";
 import { LittlePrincePaperCut } from "./LittlePrincePaperCut";
+import { GeminiFutureReel } from "./GeminiFutureReel";
+import { ClaudeFolderReel } from "./ClaudeFolderReel";
 
 export const Root: React.FC = () => {
   return (
     <>
       <Composition
+        id="ClaudeFolderReel"
+        component={ClaudeFolderReel}
+        durationInFrames={1650} // 27.5s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
         id="LittlePrincePaperCut"
         component={LittlePrincePaperCut}
-        durationInFrames={2340} // 78s at 30fps (ElevenLabs master duration)
+        durationInFrames={4740} // 158s at 30fps (Sasha Master Narration)
         fps={30}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="GeminiFutureReel"
+        component={GeminiFutureReel}
+        durationInFrames={1920} // 32s at 60fps
+        fps={60}
         width={1080}
         height={1920}
       />
