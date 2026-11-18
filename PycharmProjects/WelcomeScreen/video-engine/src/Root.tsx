@@ -3,6 +3,7 @@ import { Composition, Still } from "remotion";
 import { HorrorPart2Movie } from "./HorrorPart2Movie";
 import { HorrorPart3Movie } from "./HorrorPart3Movie";
 import { HorrorPart4Movie } from "./HorrorPart4Movie";
+import { HorrorPart5Movie } from "./HorrorPart5Movie";
 import { AingeneerBragMovie } from "./AingeneerBragMovie";
 import { AingeneerHeroShowreel } from "./AingeneerHeroShowreel";
 import { AingeneerM1n9Showreel } from "./AingeneerM1n9Showreel";
@@ -13,10 +14,118 @@ import { Real911Reconstruction } from "./Real911Reconstruction";
 import { LittlePrincePaperCut } from "./LittlePrincePaperCut";
 import { GeminiFutureReel } from "./GeminiFutureReel";
 import { ClaudeFolderReel } from "./ClaudeFolderReel";
+import { FutureMoneyReel } from "./FutureMoneyReel";
+import { FrankensteinClusterReel } from "./FrankensteinClusterReel";
+import { SoloEmpireReel } from "./SoloEmpireReel";
+import { Gta6BotReel } from "./Gta6BotReel";
+import { ZeroCodeAppReel } from "./ZeroCodeAppReel";
+import { VoiceCloneReel } from "./VoiceCloneReel";
+import { SwissAuditReel } from "./SwissAuditReel";
+import { AmberCrtReel } from "./AmberCrtReel";
+import { WhyNotAiReel } from "./WhyNotAiReel";
+import { TeslaFsdReel } from "./TeslaFsdReel";
+import { BlueprintArchitectReel } from "./BlueprintArchitectReel";
+import { ServerVaultReel } from "./ServerVaultReel";
 
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="BlueprintArchitectReel"
+        component={BlueprintArchitectReel}
+        durationInFrames={2640} // 44s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="ServerVaultReel"
+        component={ServerVaultReel}
+        durationInFrames={2520} // 42s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="TeslaFsdReel"
+        component={TeslaFsdReel}
+        durationInFrames={3000} // 50s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="AmberCrtReel"
+        component={AmberCrtReel}
+        durationInFrames={2940} // 49s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="SwissAuditReel"
+        component={SwissAuditReel}
+        durationInFrames={3180} // 53s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="WhyNotAiReel"
+        component={WhyNotAiReel}
+        durationInFrames={2640} // 44s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="ZeroCodeAppReel"
+        component={ZeroCodeAppReel}
+        durationInFrames={3000} // 50s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="VoiceCloneReel"
+        component={VoiceCloneReel}
+        durationInFrames={3240} // 54s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="Gta6BotReel"
+        component={Gta6BotReel}
+        durationInFrames={3240} // 54s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="SoloEmpireReel"
+        component={SoloEmpireReel}
+        durationInFrames={3660} // 61s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="FrankensteinClusterReel"
+        component={FrankensteinClusterReel}
+        durationInFrames={4200} // 70s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="FutureMoneyReel"
+        component={FutureMoneyReel}
+        durationInFrames={2340} // 39s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
       <Composition
         id="ClaudeFolderReel"
         component={ClaudeFolderReel}
@@ -54,6 +163,14 @@ export const Root: React.FC = () => {
         component={RedditHorrorShort}
         durationInFrames={1500} // 50s at 30fps
         fps={30}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="HorrorPart5Movie"
+        component={HorrorPart5Movie}
+        durationInFrames={3120} // 52s at 60fps
+        fps={60}
         width={1080}
         height={1920}
       />
