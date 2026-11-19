@@ -26,10 +26,28 @@ import { WhyNotAiReel } from "./WhyNotAiReel";
 import { TeslaFsdReel } from "./TeslaFsdReel";
 import { BlueprintArchitectReel } from "./BlueprintArchitectReel";
 import { ServerVaultReel } from "./ServerVaultReel";
+import { RealLifePovReel } from "./RealLifePovReel";
+import { FlightRadarReel } from "./FlightRadarReel";
 
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="FlightRadarReel"
+        component={FlightRadarReel}
+        durationInFrames={2460} // 41s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
+      <Composition
+        id="RealLifePovReel"
+        component={RealLifePovReel}
+        durationInFrames={2820} // 47s at 60fps
+        fps={60}
+        width={1080}
+        height={1920}
+      />
       <Composition
         id="BlueprintArchitectReel"
         component={BlueprintArchitectReel}
